@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>What Ports Work?</title>
+    <link rel="stylesheet" href="bootstrap.min.css"/>
+    <script defer src="script.js"></script>
+    <script>
+        const darkMode = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (darkMode)
+            document.querySelector('html').dataset.bsTheme = 'dark';
+    </script>
+</head>
+<body>
+    <main class="container my-4">
+        <h1 class="text-center">What Ports Work?</h1>
+        <p class="text-center lead">Outbound Port Tester</p>
+        <div class="row">
+            <div class="col-md-4 d-flex flex-column">
+                <div class="card h-100 mt-4">
+                    <div class="card-header d-flex justify-content-center align-items-center">
+                        <h5 class="d-inline text-center mb-0">IP</h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="card-text text-center fs-1"><code id="ip">{{ip}}</code></p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 d-flex flex-column">
+                <div class="card h-100 mt-4">
+                    <div class="card-header d-flex justify-content-center align-items-center">
+                        <h5 class="d-inline text-center mb-0">Port</h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="card-text text-center fs-1"><code id="port">{{port}}</code></p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4 d-flex flex-column">
+                <div class="card h-100 mt-4">
+                    <div class="card-header d-flex justify-content-center align-items-center">
+                        <h5 class="d-inline text-center mb-0">Protocol</h5>
+                    </div>
+                    <div class="card-body">
+                        <p class="card-text text-center fs-1"><code id="protocol">HTTP/{{protocol}}</code></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="card h-100 mt-4">
+            <div class="card-header"><h5 class="text-center mb-0">How to use</h5></div>
+            <div class="card-body">
+                <p>
+                    This server listens on all TCP ports, allowing you to test which outbound ports are blocked or not.
+                    This is the reverse of a port forwarding test, which tests which inbound ports are blocked.
+                    Often firewalls on business or guest WiFi networks will block ports other than 53, 80, and 443.
+                    This tool will help you detect these blocks.
+                </p>
+                <p>
+                    There are multiple ways to use this website (replacing <code>{{port}}</code> with your desired port number):
+                </p>
+                <ul>
+                    <li>Use the JavaScript test below.</li>
+                    <li>Changing the port number in the URL, e.g. <code>http://whatports.work:{{port}}</code>, HTTPS is currently unsupported.</li>
+                    <li>Use <code>telnet</code> or similar command line tools, e.g. <code>telnet whatports.work {{port}}</code></li>
+                    <li>Use <code>curl</code> or similar http clients, e.g. <code>curl http://whatports.work:{{port}}/raw</code></li>
+                    <li>Use <code>nmap</code> or similar port scanning tools, e.g. <code>nmap -p {{port}} whatports.work</code></li>
+                </ul>
+                <p>
+                    Also checkout <a href="http://doesipv6.work/" target="_blank" rel="noopener">doesipv6.work</a>!
+                </p>
+            </div>
+        </div>
+        <div class="card h-100 mt-4">
+            <div class="card-header"><h5 class="text-center mb-0">JavaScript TCP Port Scan</h5></div>
+            <div class="card-body" id="js-scan">
+                <noscript>
+                    <p class="text-center">Please enable JavaScript to use the JavaScript port scan.</p>
+                </noscript>
+                <div class="mx-5">
+                    <label class="form-label" for="portlist">Enter a list of ports to scan</label>
+                    <div class="input-group mb-3">
+                        <input type="text" class="form-control" id="portlist" placeholder="e.g. 80,8000,8080-8090" aria-label="Recipient's username" aria-describedby="button-addon2">
+                        <button class="btn btn-primary" type="button" id="scan">Scan</button>
+                    </div>
+                    <div id="results" class="text-center d-none">
+                        <div id="summary"></div>
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">Port</th>
+                                    <th scope="col">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="output">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card-footer text-center">
+                Note: <a href="https://fetch.spec.whatwg.org/#port-blocking">Some ports are blocked by browsers for security reasons.</a>
+            </div>
+        </div>
+    </main>
+    <footer class="container text-center mb-4">
+        <p class="m-0">Inspired by <a href="http://portquiz.net/" target="_blank" rel="noopener">portquiz.net</a></p>
+        <p class="m-0">Made with Rust - <a href="https://github.com/Steve-Tech/whatports-work" target="_blank" rel="noopener">View Source Code</a></p>
+        <div class="d-flex justify-content-center my-3 text-center">
+            <span class="py-2 px-4 badge rounded-pill bg-primary">© Stephen Horvath 2026</span>
+        </div>
+    </footer>
+</body>
+</html>

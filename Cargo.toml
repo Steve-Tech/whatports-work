@@ -1,0 +1,16 @@
+[package]
+name = "whatports-work"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hyper = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["full"] }
+tokio-util = "0.7"
+futures-util = { version = "0.3", default-features = false }
+futures = "0.3.32"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
