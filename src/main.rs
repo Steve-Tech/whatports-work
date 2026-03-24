@@ -6,6 +6,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::{IpAddr, SocketAddr};
+use std::time::SystemTime;
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -86,10 +87,23 @@ async fn http_send_file(
             eprintln!("ERROR: Unable to read file content: {}", e);
             return Ok(http_text("", Some(StatusCode::INTERNAL_SERVER_ERROR)));
         }
+        // Use the current time converted to big-endian as a pseudo-random port number for the example port
+        let example_port = if client.port == "80" {
+            (SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u16)
+                .to_be()
+                .max(1)
+                .to_string()
+        } else {
+            client.port.clone()
+        };
         content = content
             .replace("{{port}}", &client.port)
             .replace("{{ip}}", &client.ip)
-            .replace("{{protocol}}", &client.protocol);
+            .replace("{{protocol}}", &client.protocol)
+            .replace("{{example_port}}", &example_port);
         Full::new(content.into()).map_err(|e| match e {}).boxed()
     } else {
         let reader_stream = ReaderStream::new(file);
