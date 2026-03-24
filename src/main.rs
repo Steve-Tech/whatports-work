@@ -6,6 +6,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::OnceLock;
 use std::time::SystemTime;
 use tokio::{
     fs::File,
@@ -22,6 +23,8 @@ struct ClientInfo {
     protocol: String,
 }
 
+static PORT0_ADDRS: OnceLock<Vec<SocketAddr>> = OnceLock::new();
+
 async fn handle_tcp(mut stream: TcpStream, client: ClientInfo) {
     let message = format!(
         "\r\n{} Port {} is open for IP {}\r\n\r\n",
@@ -36,11 +39,22 @@ async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
     let client = ClientInfo {
         ip: addr.ip().to_string(),
         port: match socket.local_addr() {
-            Ok(local_addr) => local_addr.port().to_string(),
+            Ok(addr) => {
+                if PORT0_ADDRS
+                    .get()
+                    .map_or(false, |addrs| addrs.contains(&addr))
+                {
+                    "0".to_string()
+                } else {
+                    addr.port().to_string()
+                }
+            }
             Err(_) => "unknown".to_string(),
         },
         protocol: "UDP".to_string(),
     };
+
+    // println!("New UDP message: {} on port {}", client.ip, client.port);
 
     let message = format!(
         "\r\n{} Port {} is open for IP {}\r\n\r\n",
@@ -152,12 +166,22 @@ async fn handle_client(stream: TcpStream) {
             Err(_) => "unknown".to_string(),
         },
         port: match stream.local_addr() {
-            Ok(addr) => addr.port().to_string(),
+            Ok(addr) => {
+                if PORT0_ADDRS.get().map_or(false, |addrs| {
+                    addrs
+                        .iter()
+                        .any(|a| a.ip() == addr.ip() && a.port() == addr.port())
+                }) {
+                    "0".to_string()
+                } else {
+                    addr.port().to_string()
+                }
+            }
             Err(_) => "unknown".to_string(),
         },
         protocol: "TCP".to_string(),
     };
-    println!("New client: {} on port {}", client.ip, client.port);
+    println!("New TCP client: {} on port {}", client.ip, client.port);
 
     const TIMEOUT: time::Duration = time::Duration::from_secs(5);
     let mut buffer = [0; 16];
@@ -231,11 +255,6 @@ async fn main() {
         panic!("Start port must be less than or equal to end port.");
     }
 
-    // Port 0 will cause the OS to assign a random available port, which is not what we want
-    if start_port == 0 {
-        panic!("Port 0 is not allowed. Please specify a valid port range.")
-    }
-
     let listener_ips: Vec<IpAddr> = args[3..]
         .iter()
         .map(|ip_str| {
@@ -246,11 +265,27 @@ async fn main() {
         .collect();
 
     let mut listeners: Vec<TcpListener> = Vec::new();
+    let mut port0_addrs: Vec<SocketAddr> = Vec::new();
 
     for listener_ip in &listener_ips {
         let new_listeners: Vec<TcpListener> =
             futures::future::join_all((start_port..=end_port).map(|port| {
-                let socket = SocketAddr::new((*listener_ip).into(), port);
+                let socket = if port != 0 {
+                    SocketAddr::new((*listener_ip).into(), port)
+                } else {
+                    let sock = SocketAddr::new(
+                        match listener_ip {
+                            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                        },
+                        1024,
+                    );
+                    if !port0_addrs.contains(&sock) {
+                        port0_addrs.push(sock);
+                    println!("Note: Listening on {}:{} as port 0.", sock.ip(), sock.port());
+                    }
+                    sock
+                };
                 async move {
                     match TcpListener::bind(socket).await {
                         Ok(listener) => Ok(listener),
@@ -273,7 +308,22 @@ async fn main() {
     for listener_ip in &listener_ips {
         let new_listeners: Vec<UdpSocket> =
             futures::future::join_all((start_port..=end_port).map(|port| {
-                let socket = SocketAddr::new((*listener_ip).into(), port);
+                let socket = if port != 0 {
+                    SocketAddr::new((*listener_ip).into(), port)
+                } else {
+                    let sock = SocketAddr::new(
+                        match listener_ip {
+                            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                        },
+                        1024,
+                    );
+                    if !port0_addrs.contains(&sock) {
+                        port0_addrs.push(sock);
+                        println!("Note: Listening on {}:{} as port 0.", sock.ip(), sock.port());
+                    }
+                    sock
+                };
                 async move {
                     match UdpSocket::bind(socket).await {
                         Ok(listener) => Ok(listener),
@@ -306,6 +356,10 @@ async fn main() {
             .collect::<Vec<_>>()
             .join(", ")
     );
+
+    PORT0_ADDRS
+        .set(port0_addrs)
+        .expect("Failed to set PORT0_ADDRS");
 
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
     let mut signal = std::pin::pin!(shutdown_signal());
