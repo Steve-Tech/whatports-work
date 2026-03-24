@@ -5,7 +5,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
@@ -178,31 +178,47 @@ async fn shutdown_signal() {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("Usage: {} <interface ip> <start port> <end port>", args[0]);
+        eprintln!(
+            "Usage: {} [start port] [end port] [listening ip]...",
+            args[0]
+        );
         std::process::exit(1);
     }
 
-    let interface_ip = args[1].parse::<Ipv4Addr>().expect("Invalid interface IP");
-    let start_port: u16 = args[2].parse().expect("Invalid start port");
-    let end_port: u16 = args[3].parse().expect("Invalid end port");
+    let start_port: u16 = args[1].parse().expect("Invalid start port");
+    let end_port: u16 = args[2].parse().expect("Invalid end port");
 
-    let listeners: Vec<TcpListener> =
-        futures::future::join_all((start_port..=end_port).map(|port| {
-            let socket = SocketAddr::new(interface_ip.into(), port);
-            async move {
-                match TcpListener::bind(socket).await {
-                    Ok(listener) => Ok(listener),
-                    Err(e) => {
-                        eprintln!("Failed to bind to port {}: {}", port, e);
-                        Err(())
+    let listener_ips: Vec<IpAddr> = args[3..]
+        .iter()
+        .map(|ip_str| {
+            ip_str
+                .parse()
+                .unwrap_or_else(|_| panic!("Invalid IP address: {}", ip_str))
+        })
+        .collect();
+
+    let mut listeners: Vec<TcpListener> = Vec::new();
+
+    for listener_ip in &listener_ips {
+        let new_listeners: Vec<TcpListener> =
+            futures::future::join_all((start_port..=end_port).map(|port| {
+                let socket = SocketAddr::new((*listener_ip).into(), port);
+                async move {
+                    match TcpListener::bind(socket).await {
+                        Ok(listener) => Ok(listener),
+                        Err(e) => {
+                            eprintln!("Failed to bind to port {}: {}", port, e);
+                            Err(())
+                        }
                     }
                 }
-            }
-        }))
-        .await
-        .into_iter()
-        .filter_map(Result::ok) // Keep only successful bindings
-        .collect();
+            }))
+            .await
+            .into_iter()
+            .filter_map(Result::ok) // Keep only successful bindings
+            .collect();
+        listeners.extend(new_listeners);
+    }
 
     if listeners.is_empty() {
         eprintln!("No ports could be bound. Exiting.");
@@ -210,8 +226,14 @@ async fn main() {
     }
 
     println!(
-        "Listening on ports {} to {} on interface {}",
-        start_port, end_port, interface_ip
+        "Listening on ports {} to {} on addresses {}",
+        start_port,
+        end_port,
+        listener_ips
+            .iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
