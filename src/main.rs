@@ -188,6 +188,15 @@ async fn main() {
     let start_port: u16 = args[1].parse().expect("Invalid start port");
     let end_port: u16 = args[2].parse().expect("Invalid end port");
 
+    if start_port > end_port {
+        panic!("Start port must be less than or equal to end port.");
+    }
+
+    // Port 0 will cause the OS to assign a random available port, which is not what we want
+    if start_port == 0 {
+        panic!("Port 0 is not allowed. Please specify a valid port range.")
+    }
+
     let listener_ips: Vec<IpAddr> = args[3..]
         .iter()
         .map(|ip_str| {
