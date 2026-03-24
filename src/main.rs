@@ -9,7 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     signal, time,
 };
 use tokio_util::io::ReaderStream;
@@ -19,6 +19,35 @@ struct ClientInfo {
     ip: String,
     port: String,
     protocol: String,
+}
+
+async fn handle_tcp(mut stream: TcpStream, client: ClientInfo) {
+    let message = format!(
+        "\r\n{} Port {} is open for IP {}\r\n\r\n",
+        client.protocol, client.port, client.ip
+    );
+    if let Err(e) = stream.write_all(message.as_bytes()).await {
+        eprintln!("Failed to write to stream: {}", e);
+    }
+}
+
+async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
+    let client = ClientInfo {
+        ip: addr.ip().to_string(),
+        port: match socket.local_addr() {
+            Ok(local_addr) => local_addr.port().to_string(),
+            Err(_) => "unknown".to_string(),
+        },
+        protocol: "UDP".to_string(),
+    };
+
+    let message = format!(
+        "\r\n{} Port {} is open for IP {}\r\n\r\n",
+        client.protocol, client.port, client.ip
+    );
+    if let Err(e) = socket.send_to(message.as_bytes(), addr).await {
+        eprintln!("Failed to write to stream: {}", e);
+    }
 }
 
 fn http_text(text: &str, status: Option<StatusCode>) -> Response<BoxBody<Bytes, std::io::Error>> {
@@ -98,24 +127,20 @@ async fn handle_http(
     }
 }
 
-async fn handle_tcp(mut stream: TcpStream, client: ClientInfo) {
-    let message = format!(
-        "\r\n{} Port {} is open for IP {}\r\n\r\n",
-        client.protocol, client.port, client.ip
-    );
-    if let Err(e) = stream.write_all(message.as_bytes()).await {
-        eprintln!("Failed to write to stream: {}", e);
-    }
-}
-
 async fn handle_client(stream: TcpStream) {
     const HTTP_METHODS: [&str; 9] = [
         "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT",
     ];
 
     let client = ClientInfo {
-        ip: stream.peer_addr().unwrap().ip().to_string(),
-        port: stream.local_addr().unwrap().port().to_string(),
+        ip: match stream.peer_addr() {
+            Ok(addr) => addr.ip().to_string(),
+            Err(_) => "unknown".to_string(),
+        },
+        port: match stream.local_addr() {
+            Ok(addr) => addr.port().to_string(),
+            Err(_) => "unknown".to_string(),
+        },
         protocol: "TCP".to_string(),
     };
     println!("New client: {} on port {}", client.ip, client.port);
@@ -229,7 +254,30 @@ async fn main() {
         listeners.extend(new_listeners);
     }
 
-    if listeners.is_empty() {
+    let mut udp_listeners: Vec<UdpSocket> = Vec::new();
+
+    for listener_ip in &listener_ips {
+        let new_listeners: Vec<UdpSocket> =
+            futures::future::join_all((start_port..=end_port).map(|port| {
+                let socket = SocketAddr::new((*listener_ip).into(), port);
+                async move {
+                    match UdpSocket::bind(socket).await {
+                        Ok(listener) => Ok(listener),
+                        Err(e) => {
+                            eprintln!("Failed to bind to port {}: {}", port, e);
+                            Err(())
+                        }
+                    }
+                }
+            }))
+            .await
+            .into_iter()
+            .filter_map(Result::ok) // Keep only successful bindings
+            .collect();
+        udp_listeners.extend(new_listeners);
+    }
+
+    if listeners.is_empty() && udp_listeners.is_empty() {
         eprintln!("No ports could be bound. Exiting.");
         std::process::exit(1);
     }
@@ -267,9 +315,30 @@ async fn main() {
         })
         .collect::<futures::stream::FuturesUnordered<_>>();
 
+    let mut udp_listeners = udp_listeners
+        .into_iter()
+        .map(|socket| async move {
+            let mut buf = [0; 1024];
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((_, addr)) => {
+                        handle_udp(&socket, addr).await;
+                    }
+                    Err(e) => {
+                        eprintln!("Error receiving UDP packet: {}", e);
+                        break;
+                    }
+                }
+            }
+        })
+        .collect::<futures::stream::FuturesUnordered<_>>();
+
     tokio::select! {
         _ = listeners.next() => {
             eprintln!("A listener has stopped");
+        },
+        _ = udp_listeners.next() => {
+            eprintln!("A UDP listener has stopped");
         },
         _ = &mut signal => {
             eprintln!("Graceful shutdown signal received");

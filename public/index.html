@@ -52,7 +52,7 @@
             <div class="card-header"><h5 class="text-center mb-0">How to use</h5></div>
             <div class="card-body">
                 <p>
-                    This server listens on all TCP ports, allowing you to test which outbound ports are blocked or not.
+                    This server listens on all TCP and UDP ports, allowing you to test which outbound ports are blocked or not.
                     This is the reverse of a port forwarding test, which tests which inbound ports are blocked.
                     Often firewalls on business or guest WiFi networks will block ports other than 53, 80, and 443.
                     This tool will help you detect these blocks.
@@ -61,11 +61,12 @@
                     There are multiple ways to use this website (replacing <code>{{port}}</code> with your desired port number):
                 </p>
                 <ul>
-                    <li>Use the JavaScript test below.</li>
+                    <li>Using the JavaScript test below.</li>
                     <li>Changing the port number in the URL, e.g. <code>http://whatports.work:{{port}}</code>, HTTPS is currently unsupported.</li>
-                    <li>Use <code>telnet</code> or similar command line tools, e.g. <code>telnet whatports.work {{port}}</code></li>
-                    <li>Use <code>curl</code> or similar http clients, e.g. <code>curl http://whatports.work:{{port}}/raw</code></li>
-                    <li>Use <code>nmap</code> or similar port scanning tools, e.g. <code>nmap -p {{port}} whatports.work</code></li>
+                    <li>Using <code>telnet</code> or similar command line tools, e.g. <code>telnet whatports.work {{port}}</code></li>
+                    <li>Using <code>netcat</code> for UDP testing, e.g. <code>echo | nc -u whatports.work {{port}}</code></li>
+                    <li>Using <code>curl</code>, e.g. <code>curl http://whatports.work:{{port}}/raw</code></li>
+                    <li>Using <code>nmap</code>, e.g. <code>nmap -p {{port}} whatports.work</code></li>
                 </ul>
                 <p>
                     Also checkout <a href="http://doesipv6.work/" target="_blank" rel="noopener">doesipv6.work</a>!
