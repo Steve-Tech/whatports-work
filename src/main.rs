@@ -139,12 +139,30 @@ async fn handle_http(
     }
 
     match req.uri().path() {
-        "/" => http_send_file("public/index.html", Some(client)).await,
+        "/" => {
+            if req
+                .headers()
+                .get("Accept")
+                .map_or(false, |h| h.to_str().unwrap_or("").contains("text/html"))
+            {
+                http_send_file("public/index.html", Some(client)).await
+            } else {
+                Ok(http_text(
+                    format!(
+                        "{} Port {} is open for IP {}\r\n",
+                        client.protocol, client.port, client.ip
+                    )
+                    .as_str(),
+                    None,
+                ))
+            }
+        }
+        "/index.html" => http_send_file("public/index.html", Some(client)).await,
         "/script.js" => http_send_file("public/script.js", None).await,
         "/bootstrap.min.css" => http_send_file("public/bootstrap.min.css", None).await,
         "/raw" => Ok(http_text(
             format!(
-                "{} Port {} is open for IP {}",
+                "{} Port {} is open for IP {}\r\n",
                 client.protocol, client.port, client.ip
             )
             .as_str(),
@@ -282,7 +300,11 @@ async fn main() {
                     );
                     if !port0_addrs.contains(&sock) {
                         port0_addrs.push(sock);
-                    println!("Note: Listening on {}:{} as port 0.", sock.ip(), sock.port());
+                        println!(
+                            "Note: Listening on {}:{} as port 0.",
+                            sock.ip(),
+                            sock.port()
+                        );
                     }
                     sock
                 };
@@ -320,7 +342,11 @@ async fn main() {
                     );
                     if !port0_addrs.contains(&sock) {
                         port0_addrs.push(sock);
-                        println!("Note: Listening on {}:{} as port 0.", sock.ip(), sock.port());
+                        println!(
+                            "Note: Listening on {}:{} as port 0.",
+                            sock.ip(),
+                            sock.port()
+                        );
                     }
                     sock
                 };
