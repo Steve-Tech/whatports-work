@@ -67,10 +67,15 @@ async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
 
 fn http_text(text: &str, status: Option<StatusCode>) -> Response<BoxBody<Bytes, std::io::Error>> {
     let status = status.unwrap_or(StatusCode::OK);
-    Response::builder()
+    let mut builder = Response::builder()
         .status(status)
-        .header("Access-Control-Allow-Origin", "*")
-        .body(
+        .header("Access-Control-Allow-Origin", "*");
+
+    if !text.is_empty() {
+        builder = builder.header("Content-Type", "text/plain");
+    }
+
+    builder.body(
             Full::new(Bytes::from(text.to_string()))
                 .map_err(|e| match e {})
                 .boxed(),
@@ -80,6 +85,7 @@ fn http_text(text: &str, status: Option<StatusCode>) -> Response<BoxBody<Bytes, 
 
 async fn http_send_file(
     filename: &str,
+    content_type: &str,
     client: Option<ClientInfo>,
 ) -> Result<Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> {
     let file = File::open(filename).await;
@@ -126,6 +132,7 @@ async fn http_send_file(
 
     Ok(Response::builder()
         .status(StatusCode::OK)
+        .header("Content-Type", content_type)
         .body(boxed_body)
         .expect("constant status won't error"))
 }
@@ -145,7 +152,7 @@ async fn handle_http(
                 .get("Accept")
                 .map_or(false, |h| h.to_str().unwrap_or("").contains("text/html"))
             {
-                http_send_file("public/index.html", Some(client)).await
+                http_send_file("public/index.html", "text/html", Some(client)).await
             } else {
                 Ok(http_text(
                     format!(
@@ -157,9 +164,9 @@ async fn handle_http(
                 ))
             }
         }
-        "/index.html" => http_send_file("public/index.html", Some(client)).await,
-        "/script.js" => http_send_file("public/script.js", None).await,
-        "/bootstrap.min.css" => http_send_file("public/bootstrap.min.css", None).await,
+        "/index.html" => http_send_file("public/index.html", "text/html", Some(client)).await,
+        "/script.js" => http_send_file("public/script.js", "application/javascript", None).await,
+        "/bootstrap.min.css" => http_send_file("public/bootstrap.min.css", "text/css", None).await,
         "/raw" => Ok(http_text(
             format!(
                 "{} Port {} is open for IP {}\r\n",
