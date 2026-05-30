@@ -66,14 +66,14 @@ async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
     }
 }
 
-fn http_text(text: &str, status: Option<StatusCode>) -> Response<BoxBody<Bytes, std::io::Error>> {
+fn http_text(text: &str, status: Option<StatusCode>, content_type: Option<&str>) -> Response<BoxBody<Bytes, std::io::Error>> {
     let status = status.unwrap_or(StatusCode::OK);
     let mut builder = Response::builder()
         .status(status)
         .header("Access-Control-Allow-Origin", "*");
 
     if !text.is_empty() {
-        builder = builder.header("Content-Type", "text/plain");
+        builder = builder.header("Content-Type", content_type.unwrap_or("text/plain"));
     }
 
     builder
@@ -93,21 +93,21 @@ async fn http_send_file(
     let file = File::open(filename).await;
     if file.is_err() {
         eprintln!("ERROR: Unable to open file.");
-        return Ok(http_text("", Some(StatusCode::NOT_FOUND)));
+        return Ok(http_text("", Some(StatusCode::NOT_FOUND), None));
     }
 
     let mut file = match file {
         Ok(f) => f,
         Err(e) => {
             eprintln!("ERROR: Unable to open file: {}", e);
-            return Ok(http_text("", Some(StatusCode::INTERNAL_SERVER_ERROR)));
+            return Ok(http_text("", Some(StatusCode::INTERNAL_SERVER_ERROR), None));
         }
     };
     let boxed_body: BoxBody<Bytes, std::io::Error> = if let Some(client) = client {
         let mut content = String::new();
         if let Err(e) = file.read_to_string(&mut content).await {
             eprintln!("ERROR: Unable to read file content: {}", e);
-            return Ok(http_text("", Some(StatusCode::INTERNAL_SERVER_ERROR)));
+            return Ok(http_text("", Some(StatusCode::INTERNAL_SERVER_ERROR), None));
         }
         // Use the current time converted to big-endian as a pseudo-random port number for the example port
         let example_port = if client.port == "80" {
@@ -144,7 +144,7 @@ async fn handle_http(
     client: ClientInfo,
 ) -> Result<Response<BoxBody<Bytes, std::io::Error>>, std::io::Error> {
     if req.method() != hyper::Method::GET {
-        return Ok(http_text("", Some(StatusCode::METHOD_NOT_ALLOWED)));
+        return Ok(http_text("", Some(StatusCode::METHOD_NOT_ALLOWED), None));
     }
 
     match req.uri().path() {
@@ -163,6 +163,7 @@ async fn handle_http(
                     )
                     .as_str(),
                     None,
+                    None
                 ))
             }
         }
@@ -176,6 +177,7 @@ async fn handle_http(
             )
             .as_str(),
             None,
+            None
         )),
         "/json" => Ok(http_text(
             format!(
@@ -184,9 +186,10 @@ async fn handle_http(
             )
             .as_str(),
             None,
+            Some("application/json")
         )),
-        "/ping" => Ok(http_text("", Some(StatusCode::NO_CONTENT))),
-        _ => Ok(http_text("", Some(StatusCode::NOT_FOUND))),
+        "/ping" => Ok(http_text("", Some(StatusCode::NO_CONTENT), None)),
+        _ => Ok(http_text("", Some(StatusCode::NOT_FOUND), None)),
     }
 }
 
