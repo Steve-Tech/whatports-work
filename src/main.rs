@@ -5,6 +5,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
 use std::time::SystemTime;
@@ -24,7 +25,7 @@ struct ClientInfo {
     protocol: String,
 }
 
-static PORT0_ADDRS: OnceLock<Vec<SocketAddr>> = OnceLock::new();
+static PORT_MAPS: OnceLock<HashMap<SocketAddr, u16>> = OnceLock::new();
 
 async fn handle_tcp(mut stream: TcpStream, client: ClientInfo) {
     let message = format!(
@@ -42,11 +43,9 @@ async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
         srcport: addr.port().to_string(),
         port: match socket.local_addr() {
             Ok(addr) => {
-                if PORT0_ADDRS
-                    .get()
-                    .map_or(false, |addrs| addrs.contains(&addr))
-                {
-                    "0".to_string()
+                let port_map = PORT_MAPS.get();
+                if port_map.is_some() && port_map.unwrap().contains_key(&addr) {
+                    port_map.unwrap()[&addr].to_string()
                 } else {
                     addr.port().to_string()
                 }
@@ -207,12 +206,9 @@ async fn handle_client(stream: TcpStream) {
         },
         port: match stream.local_addr() {
             Ok(addr) => {
-                if PORT0_ADDRS.get().map_or(false, |addrs| {
-                    addrs
-                        .iter()
-                        .any(|a| a.ip() == addr.ip() && a.port() == addr.port())
-                }) {
-                    "0".to_string()
+                let port_map = PORT_MAPS.get();
+                if port_map.is_some() && port_map.unwrap().contains_key(&addr) {
+                    port_map.unwrap()[&addr].to_string()
                 } else {
                     addr.port().to_string()
                 }
@@ -294,30 +290,53 @@ async fn main() {
     struct Config {
         start_port: u16,
         end_port: u16,
-        port0: bool,
+        mapped_port: Option<u16>,
         listener_ip: IpAddr,
     }
 
     let mut configs: Vec<Config> = Vec::new();
 
     for arg in &args[1..] {
-        let (host_and_ports, has_mapped_port) = if let Some((before_mapped, mapped)) = arg.rsplit_once(':') {
-            if mapped == "0" {
-                (before_mapped, true)
-            } else {
-                (arg.as_str(), false)
-            }
-        } else {
-            print_usage(args[0].as_str());
-            unreachable!();
-        };
-
-        let (raw_ip, port_spec) = host_and_ports
-            .rsplit_once(':')
-            .unwrap_or_else(|| {
+        let (raw_ip, port_spec, mapped_port) = if let Some(ip_and_rest) = arg.strip_prefix('[') {
+            let close_bracket = ip_and_rest.find(']').unwrap_or_else(|| {
                 print_usage(args[0].as_str());
                 unreachable!();
             });
+            let raw_ip = &ip_and_rest[..close_bracket];
+            let rest = ip_and_rest[close_bracket + 1..]
+                .strip_prefix(':')
+                .unwrap_or_else(|| {
+                    print_usage(args[0].as_str());
+                    unreachable!();
+                });
+            let mut parts = rest.split(':');
+            let port_spec = parts.next().unwrap_or_else(|| {
+                print_usage(args[0].as_str());
+                unreachable!();
+            });
+            let mapped_port = parts.next();
+            if parts.next().is_some() {
+                print_usage(args[0].as_str());
+                unreachable!();
+            }
+            (raw_ip, port_spec, mapped_port)
+        } else {
+            let colon_count = arg.matches(':').count();
+            if colon_count == 2 {
+                let parts: Vec<&str> = arg.split(':').collect();
+                let [raw_ip, port_spec, mapped_port] = parts.as_slice() else {
+                    print_usage(args[0].as_str());
+                    unreachable!();
+                };
+                (*raw_ip, *port_spec, Some(*mapped_port))
+            } else {
+                let (raw_ip, port_spec) = arg.rsplit_once(':').unwrap_or_else(|| {
+                    print_usage(args[0].as_str());
+                    unreachable!();
+                });
+                (raw_ip, port_spec, None)
+            }
+        };
         let ip_text = raw_ip
             .strip_prefix('[')
             .and_then(|text| text.strip_suffix(']'))
@@ -353,37 +372,43 @@ async fn main() {
             panic!("Start port must be less than or equal to end port.");
         }
 
-        let mut port0 = false;
-        if has_mapped_port {
-            port0 = true;
+        let mapped_port = if let Some(mapped_port) = mapped_port {
+            let mapped_port = mapped_port
+                .parse::<u16>()
+                .unwrap_or_else(|_| panic!("Invalid mapped port: {}", mapped_port));
             if start_port != end_port {
-                panic!("Port 0 mapping can only be used for single ports, not ranges.");
+                panic!("Port mapping can only be used for single ports, not ranges.");
             }
-        }
+            Some(mapped_port)
+        } else {
+            None
+        };
 
         configs.push(Config {
             start_port,
             end_port,
-            port0,
+            mapped_port,
             listener_ip: ip_addr,
         });
     }
 
     let mut tcp_listeners: Vec<TcpListener> = Vec::new();
     let mut udp_listeners: Vec<UdpSocket> = Vec::new();
-    let mut port0_addrs: Vec<SocketAddr> = Vec::new();
+    let mut port_maps: HashMap<SocketAddr, u16> = HashMap::new();
 
     // TCP listeners
     for config in &configs {
         let new_listeners: Vec<TcpListener> =
             futures::future::join_all((config.start_port..=config.end_port).map(|port| {
                 let socket = SocketAddr::new(config.listener_ip, port);
-                if config.port0 && !port0_addrs.contains(&socket) {
-                    port0_addrs.push(socket);
+                if config.mapped_port.is_some() && !port_maps.contains_key(&socket) {
+                    port_maps.insert(socket, config.mapped_port.unwrap());
+                    let mapped_port = config.mapped_port.unwrap();
                     println!(
-                        "Note: Listening on {}:{} as port 0.",
+                        "Note: Listening on {}:{} as port {}.",
                         socket.ip(),
-                        socket.port()
+                        socket.port(),
+                        mapped_port
                     );
                 }
                 async move {
@@ -408,12 +433,14 @@ async fn main() {
         let new_listeners: Vec<UdpSocket> =
             futures::future::join_all((config.start_port..=config.end_port).map(|port| {
                 let socket = SocketAddr::new(config.listener_ip, port);
-                if config.port0 && !port0_addrs.contains(&socket) {
-                    port0_addrs.push(socket);
+                if config.mapped_port.is_some() && !port_maps.contains_key(&socket) {
+                    port_maps.insert(socket, config.mapped_port.unwrap());
+                    let mapped_port = config.mapped_port.unwrap();
                     println!(
-                        "Note: Listening on {}:{} as port 0.",
+                        "Note: Listening on {}:{} as port {}.",
                         socket.ip(),
-                        socket.port()
+                        socket.port(),
+                        mapped_port
                     );
                 }
                 async move {
@@ -438,9 +465,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    PORT0_ADDRS
-        .set(port0_addrs)
-        .expect("Failed to set PORT0_ADDRS");
+    PORT_MAPS.set(port_maps).expect("Failed to set PORT_MAPS");
 
     let mut tcp_listeners = tcp_listeners
         .into_iter()
