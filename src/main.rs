@@ -280,59 +280,112 @@ async fn shutdown_signal() {
         .expect("failed to install CTRL+C signal handler");
 }
 
+fn print_usage(program_name: &str) {
+    eprintln!(
+        "Usage: {} [ip-address]:start_port[-end_port][:mapped_port]...",
+        program_name
+    );
+    std::process::exit(1);
+}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!(
-            "Usage: {} [start port] [end port] [listening ip]...",
-            args[0]
-        );
-        std::process::exit(1);
+    struct Config {
+        start_port: u16,
+        end_port: u16,
+        port0: bool,
+        listener_ip: IpAddr,
     }
 
-    let start_port: u16 = args[1].parse().expect("Invalid start port");
-    let end_port: u16 = args[2].parse().expect("Invalid end port");
+    let mut configs: Vec<Config> = Vec::new();
 
-    if start_port > end_port {
-        panic!("Start port must be less than or equal to end port.");
-    }
+    for arg in &args[1..] {
+        let (host_and_ports, has_mapped_port) = if let Some((before_mapped, mapped)) = arg.rsplit_once(':') {
+            if mapped == "0" {
+                (before_mapped, true)
+            } else {
+                (arg.as_str(), false)
+            }
+        } else {
+            print_usage(args[0].as_str());
+            unreachable!();
+        };
 
-    let listener_ips: Vec<IpAddr> = args[3..]
-        .iter()
-        .map(|ip_str| {
-            ip_str
+        let (raw_ip, port_spec) = host_and_ports
+            .rsplit_once(':')
+            .unwrap_or_else(|| {
+                print_usage(args[0].as_str());
+                unreachable!();
+            });
+        let ip_text = raw_ip
+            .strip_prefix('[')
+            .and_then(|text| text.strip_suffix(']'))
+            .unwrap_or(raw_ip);
+        let ip_addr = ip_text
+            .parse()
+            .unwrap_or_else(|_| panic!("Invalid IP address: {}", ip_text));
+        let ports = port_spec.split('-').collect::<Vec<&str>>();
+        let start_port: u16;
+        let end_port: u16;
+
+        if ports.len() == 1 {
+            start_port = ports[0]
                 .parse()
-                .unwrap_or_else(|_| panic!("Invalid IP address: {}", ip_str))
-        })
-        .collect();
+                .unwrap_or_else(|_| panic!("Invalid port: {}", port_spec));
+            end_port = start_port;
+        } else if ports.len() == 2 {
+            start_port = ports[0]
+                .parse()
+                .unwrap_or_else(|_| panic!("Invalid start port: {}", ports[0]));
+            end_port = ports[1]
+                .parse()
+                .unwrap_or_else(|_| panic!("Invalid end port: {}", ports[1]));
+            if start_port == 0 || end_port == 0 {
+                panic!("Port ranges must be between 1 and 65535.");
+            }
+        } else {
+            print_usage(args[0].as_str());
+            panic!();
+        }
 
-    let mut listeners: Vec<TcpListener> = Vec::new();
+        if start_port > end_port {
+            panic!("Start port must be less than or equal to end port.");
+        }
+
+        let mut port0 = false;
+        if has_mapped_port {
+            port0 = true;
+            if start_port != end_port {
+                panic!("Port 0 mapping can only be used for single ports, not ranges.");
+            }
+        }
+
+        configs.push(Config {
+            start_port,
+            end_port,
+            port0,
+            listener_ip: ip_addr,
+        });
+    }
+
+    let mut tcp_listeners: Vec<TcpListener> = Vec::new();
+    let mut udp_listeners: Vec<UdpSocket> = Vec::new();
     let mut port0_addrs: Vec<SocketAddr> = Vec::new();
 
-    for listener_ip in &listener_ips {
+    // TCP listeners
+    for config in &configs {
         let new_listeners: Vec<TcpListener> =
-            futures::future::join_all((start_port..=end_port).map(|port| {
-                let socket = if port != 0 {
-                    SocketAddr::new((*listener_ip).into(), port)
-                } else {
-                    let sock = SocketAddr::new(
-                        match listener_ip {
-                            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-                        },
-                        1024,
+            futures::future::join_all((config.start_port..=config.end_port).map(|port| {
+                let socket = SocketAddr::new(config.listener_ip, port);
+                if config.port0 && !port0_addrs.contains(&socket) {
+                    port0_addrs.push(socket);
+                    println!(
+                        "Note: Listening on {}:{} as port 0.",
+                        socket.ip(),
+                        socket.port()
                     );
-                    if !port0_addrs.contains(&sock) {
-                        port0_addrs.push(sock);
-                        println!(
-                            "Note: Listening on {}:{} as port 0.",
-                            sock.ip(),
-                            sock.port()
-                        );
-                    }
-                    sock
-                };
+                }
                 async move {
                     match TcpListener::bind(socket).await {
                         Ok(listener) => Ok(listener),
@@ -347,34 +400,22 @@ async fn main() {
             .into_iter()
             .filter_map(Result::ok) // Keep only successful bindings
             .collect();
-        listeners.extend(new_listeners);
+        tcp_listeners.extend(new_listeners);
     }
 
-    let mut udp_listeners: Vec<UdpSocket> = Vec::new();
-
-    for listener_ip in &listener_ips {
+    // UDP listeners
+    for config in &configs {
         let new_listeners: Vec<UdpSocket> =
-            futures::future::join_all((start_port..=end_port).map(|port| {
-                let socket = if port != 0 {
-                    SocketAddr::new((*listener_ip).into(), port)
-                } else {
-                    let sock = SocketAddr::new(
-                        match listener_ip {
-                            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                            IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
-                        },
-                        1024,
+            futures::future::join_all((config.start_port..=config.end_port).map(|port| {
+                let socket = SocketAddr::new(config.listener_ip, port);
+                if config.port0 && !port0_addrs.contains(&socket) {
+                    port0_addrs.push(socket);
+                    println!(
+                        "Note: Listening on {}:{} as port 0.",
+                        socket.ip(),
+                        socket.port()
                     );
-                    if !port0_addrs.contains(&sock) {
-                        port0_addrs.push(sock);
-                        println!(
-                            "Note: Listening on {}:{} as port 0.",
-                            sock.ip(),
-                            sock.port()
-                        );
-                    }
-                    sock
-                };
+                }
                 async move {
                     match UdpSocket::bind(socket).await {
                         Ok(listener) => Ok(listener),
@@ -392,30 +433,16 @@ async fn main() {
         udp_listeners.extend(new_listeners);
     }
 
-    if listeners.is_empty() && udp_listeners.is_empty() {
+    if tcp_listeners.is_empty() && udp_listeners.is_empty() {
         eprintln!("No ports could be bound. Exiting.");
         std::process::exit(1);
     }
-
-    println!(
-        "Listening on ports {} to {} on addresses {}",
-        start_port,
-        end_port,
-        listener_ips
-            .iter()
-            .map(|ip| ip.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
 
     PORT0_ADDRS
         .set(port0_addrs)
         .expect("Failed to set PORT0_ADDRS");
 
-    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
-    let mut signal = std::pin::pin!(shutdown_signal());
-
-    let mut listeners = listeners
+    let mut tcp_listeners = tcp_listeners
         .into_iter()
         .map(|listener| async move {
             loop {
@@ -452,8 +479,18 @@ async fn main() {
         })
         .collect::<futures::stream::FuturesUnordered<_>>();
 
+    for config in &configs {
+        println!(
+            "Listening on ports {} to {} on address {}",
+            config.start_port, config.end_port, config.listener_ip
+        );
+    }
+
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let mut signal = std::pin::pin!(shutdown_signal());
+
     tokio::select! {
-        _ = listeners.next() => {
+        _ = tcp_listeners.next() => {
             eprintln!("A listener has stopped");
         },
         _ = udp_listeners.next() => {
