@@ -5,8 +5,11 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rustls_pemfile::{certs as pem_certs, pkcs8_private_keys, rsa_private_keys};
 use std::collections::HashMap;
+use std::io::{BufReader, Cursor};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 use tokio::{
@@ -15,6 +18,10 @@ use tokio::{
     net::{TcpListener, TcpStream, UdpSocket},
     signal, time,
 };
+use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::Certificate as RustlsCertificate;
+use tokio_rustls::rustls::PrivateKey as RustlsPrivateKey;
+use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
 use tokio_util::io::ReaderStream;
 
 #[derive(Clone)]
@@ -66,7 +73,11 @@ async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
     }
 }
 
-fn http_text(text: &str, status: Option<StatusCode>, content_type: Option<&str>) -> Response<BoxBody<Bytes, std::io::Error>> {
+fn http_text(
+    text: &str,
+    status: Option<StatusCode>,
+    content_type: Option<&str>,
+) -> Response<BoxBody<Bytes, std::io::Error>> {
     let status = status.unwrap_or(StatusCode::OK);
     let mut builder = Response::builder()
         .status(status)
@@ -163,7 +174,7 @@ async fn handle_http(
                     )
                     .as_str(),
                     None,
-                    None
+                    None,
                 ))
             }
         }
@@ -177,7 +188,7 @@ async fn handle_http(
             )
             .as_str(),
             None,
-            None
+            None,
         )),
         "/json" => Ok(http_text(
             format!(
@@ -186,19 +197,20 @@ async fn handle_http(
             )
             .as_str(),
             None,
-            Some("application/json")
+            Some("application/json"),
         )),
         "/ping" => Ok(http_text("", Some(StatusCode::NO_CONTENT), None)),
         _ => Ok(http_text("", Some(StatusCode::NOT_FOUND), None)),
     }
 }
 
-async fn handle_client(stream: TcpStream) {
+async fn handle_client(stream: TcpStream, acceptor_opt: Option<TlsAcceptor>) {
     const HTTP_METHODS: [&str; 9] = [
         "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT",
     ];
 
-    let client = ClientInfo {
+    // Build client info early (used whether TLS or plain)
+    let mut client = ClientInfo {
         ip: match stream.peer_addr() {
             Ok(addr) => addr.ip().to_string(),
             Err(_) => "unknown".to_string(),
@@ -226,9 +238,55 @@ async fn handle_client(stream: TcpStream) {
     );
 
     const TIMEOUT: time::Duration = time::Duration::from_secs(5);
-    let mut buffer = [0; 16];
-    match time::timeout(TIMEOUT, stream.peek(&mut buffer)).await {
-        Ok(Ok(n)) if n > 0 => {
+    let mut buffer = [0u8; 16];
+
+    // Peek once and use the result for both TLS detection and HTTP method detection.
+    let n_opt = match time::timeout(TIMEOUT, stream.peek(&mut buffer)).await {
+        Ok(Ok(n)) if n > 0 => Some(n),
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => {
+            eprintln!("Error peeking from stream: {}", e);
+            None
+        }
+        Err(_) => Some(0),
+    };
+
+    let is_tls_client_hello = if let Some(n) = n_opt {
+        n >= 3 && buffer[0] == 22 && buffer[1] == 0x03 && buffer[2] <= 0x04
+    } else {
+        false
+    };
+
+    if is_tls_client_hello {
+        if let Some(acceptor) = acceptor_opt {
+            client.protocol = "HTTPS/TCP".to_string();
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => {
+                    println!(
+                        "TLS handshake successful with client {}:{} on port {}",
+                        client.ip, client.srcport, client.port
+                    );
+                    handle_tls_connection(tls_stream, client).await;
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("TLS handshake failed: {}", e);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Not TLS or missing a certificate
+    match n_opt {
+        Some(0) => {
+            println!(
+                "Timeout waiting for data from client {} on port {}",
+                client.ip, client.port
+            );
+            handle_tcp(stream, client).await;
+        }
+        Some(n) => {
             let request_str = String::from_utf8_lossy(&buffer[..n]);
             let method = request_str.split_whitespace().next().unwrap_or("");
             if HTTP_METHODS.contains(&method) {
@@ -237,11 +295,11 @@ async fn handle_client(stream: TcpStream) {
                     client.ip, client.port, method
                 );
                 let io = TokioIo::new(stream);
-                let client_clone = client.clone();
+                client.protocol = "HTTP/TCP".to_string();
                 if let Err(err) = http1::Builder::new()
                     .serve_connection(
                         io,
-                        service_fn(move |req| handle_http(req, client_clone.clone())),
+                        service_fn(move |req| handle_http(req, client.clone())),
                     )
                     .await
                 {
@@ -255,22 +313,60 @@ async fn handle_client(stream: TcpStream) {
                 handle_tcp(stream, client).await;
             }
         }
-        Ok(Ok(_)) => println!(
-            "Client {} closed the connection on port {}",
-            client.ip, client.port
-        ),
-        Ok(Err(e)) => eprintln!(
-            "Error reading from client {} on port {}: {}",
-            client.ip, client.port, e
-        ),
-        Err(_) => {
+        None => {
             println!(
-                "Timeout waiting for data from client {} on port {}",
+                "Client {} closed the connection on port {}",
                 client.ip, client.port
             );
-            handle_tcp(stream, client).await;
         }
     }
+}
+
+async fn handle_tls_connection<T>(stream: T, client: ClientInfo)
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(stream);
+    if let Err(err) = http1::Builder::new()
+        .serve_connection(io, service_fn(move |req| handle_http(req, client.clone())))
+        .await
+    {
+        eprintln!("Error serving TLS connection: {:?}", err);
+    }
+}
+
+fn load_rustls_config(cert_path: &str, key_path: &str) -> Option<RustlsServerConfig> {
+    let cert_bytes = std::fs::read(cert_path).ok()?;
+    let key_bytes = std::fs::read(key_path).ok()?;
+
+    let mut cert_reader = BufReader::new(Cursor::new(cert_bytes));
+    let cert_chain = pem_certs(&mut cert_reader).ok()?;
+    if cert_chain.is_empty() {
+        eprintln!("No certificates found in {}", cert_path);
+        return None;
+    }
+    let certs: Vec<RustlsCertificate> = cert_chain.into_iter().map(RustlsCertificate).collect();
+
+    let mut key_reader = BufReader::new(Cursor::new(key_bytes));
+    let mut keys = pkcs8_private_keys(&mut key_reader).ok()?;
+    if keys.is_empty() {
+        // try RSA keys
+        let mut key_reader = BufReader::new(Cursor::new(std::fs::read(key_path).ok()?));
+        keys = rsa_private_keys(&mut key_reader).ok()?;
+    }
+    if keys.is_empty() {
+        eprintln!("No private keys found in {}", key_path);
+        return None;
+    }
+    let key = RustlsPrivateKey(keys.remove(0));
+
+    let server_config = RustlsServerConfig::builder()
+        .with_safe_defaults()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .ok()?;
+
+    Some(server_config)
 }
 
 async fn shutdown_signal() {
@@ -470,19 +566,41 @@ async fn main() {
 
     PORT_MAPS.set(port_maps).expect("Failed to set PORT_MAPS");
 
+    let acceptor_opt = if let (Ok(cert), Ok(key)) = (
+        std::env::var("WHATPORTS_TLS_CERT"),
+        std::env::var("WHATPORTS_TLS_KEY"),
+    ) {
+        match load_rustls_config(&cert, &key) {
+            Some(cfg) => {
+                println!("Loaded TLS certificate and key; HTTPS enabled for port 443/mapped 443");
+                Some(TlsAcceptor::from(Arc::new(cfg)))
+            }
+            None => {
+                eprintln!("Failed to load TLS certificate/key — continuing without HTTPS");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut tcp_listeners = tcp_listeners
         .into_iter()
-        .map(|listener| async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        tokio::spawn(async move {
-                            handle_client(stream).await;
-                        });
-                    }
-                    Err(e) => {
-                        eprintln!("Error accepting connection: {}", e);
-                        break;
+        .map(|listener| {
+            let acceptor = acceptor_opt.clone();
+            async move {
+                loop {
+                    match listener.accept().await {
+                        Ok((stream, _)) => {
+                            let acceptor_clone = acceptor.clone();
+                            tokio::spawn(async move {
+                                handle_client(stream, acceptor_clone).await;
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("Error accepting connection: {}", e);
+                            break;
+                        }
                     }
                 }
             }
