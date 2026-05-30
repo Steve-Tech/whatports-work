@@ -19,6 +19,7 @@ use tokio_util::io::ReaderStream;
 #[derive(Clone)]
 struct ClientInfo {
     ip: String,
+    srcport: String,
     port: String,
     protocol: String,
 }
@@ -27,8 +28,8 @@ static PORT0_ADDRS: OnceLock<Vec<SocketAddr>> = OnceLock::new();
 
 async fn handle_tcp(mut stream: TcpStream, client: ClientInfo) {
     let message = format!(
-        "\r\n{} Port {} is open for IP {}\r\n\r\n",
-        client.protocol, client.port, client.ip
+        "\r\n{} Port {} is open for IP {} (source port {})\r\n\r\n",
+        client.protocol, client.port, client.ip, client.srcport
     );
     if let Err(e) = stream.write_all(message.as_bytes()).await {
         eprintln!("Failed to write to stream: {}", e);
@@ -38,6 +39,7 @@ async fn handle_tcp(mut stream: TcpStream, client: ClientInfo) {
 async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
     let client = ClientInfo {
         ip: addr.ip().to_string(),
+        srcport: addr.port().to_string(),
         port: match socket.local_addr() {
             Ok(addr) => {
                 if PORT0_ADDRS
@@ -57,8 +59,8 @@ async fn handle_udp(socket: &UdpSocket, addr: SocketAddr) {
     // println!("New UDP message: {} on port {}", client.ip, client.port);
 
     let message = format!(
-        "\r\n{} Port {} is open for IP {}\r\n\r\n",
-        client.protocol, client.port, client.ip
+        "\r\n{} Port {} is open for IP {} (source port {})\r\n\r\n",
+        client.protocol, client.port, client.ip, client.srcport
     );
     if let Err(e) = socket.send_to(message.as_bytes(), addr).await {
         eprintln!("Failed to write to stream: {}", e);
@@ -75,7 +77,8 @@ fn http_text(text: &str, status: Option<StatusCode>) -> Response<BoxBody<Bytes, 
         builder = builder.header("Content-Type", "text/plain");
     }
 
-    builder.body(
+    builder
+        .body(
             Full::new(Bytes::from(text.to_string()))
                 .map_err(|e| match e {})
                 .boxed(),
@@ -156,8 +159,8 @@ async fn handle_http(
             } else {
                 Ok(http_text(
                     format!(
-                        "{} Port {} is open for IP {}\r\n",
-                        client.protocol, client.port, client.ip
+                        "{} Port {} is open for IP {} (source port {})\r\n",
+                        client.protocol, client.port, client.ip, client.srcport
                     )
                     .as_str(),
                     None,
@@ -169,8 +172,8 @@ async fn handle_http(
         "/bootstrap.min.css" => http_send_file("public/bootstrap.min.css", "text/css", None).await,
         "/raw" => Ok(http_text(
             format!(
-                "{} Port {} is open for IP {}\r\n",
-                client.protocol, client.port, client.ip
+                "{} Port {} is open for IP {} (source port {})\r\n",
+                client.protocol, client.port, client.ip, client.srcport
             )
             .as_str(),
             None,
@@ -190,6 +193,10 @@ async fn handle_client(stream: TcpStream) {
             Ok(addr) => addr.ip().to_string(),
             Err(_) => "unknown".to_string(),
         },
+        srcport: match stream.peer_addr() {
+            Ok(addr) => addr.port().to_string(),
+            Err(_) => "unknown".to_string(),
+        },
         port: match stream.local_addr() {
             Ok(addr) => {
                 if PORT0_ADDRS.get().map_or(false, |addrs| {
@@ -206,7 +213,10 @@ async fn handle_client(stream: TcpStream) {
         },
         protocol: "TCP".to_string(),
     };
-    println!("New TCP client: {} on port {}", client.ip, client.port);
+    println!(
+        "New TCP client: {}:{} on port {}",
+        client.ip, client.srcport, client.port
+    );
 
     const TIMEOUT: time::Duration = time::Duration::from_secs(5);
     let mut buffer = [0; 16];
