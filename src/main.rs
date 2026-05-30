@@ -178,6 +178,14 @@ async fn handle_http(
             .as_str(),
             None,
         )),
+        "/json" => Ok(http_text(
+            format!(
+                "{{\"protocol\":\"{}\",\"port\":\"{}\",\"ip\":\"{}\",\"srcport\":\"{}\"}}",
+                client.protocol, client.port, client.ip, client.srcport
+            )
+            .as_str(),
+            None,
+        )),
         "/ping" => Ok(http_text("", Some(StatusCode::NO_CONTENT))),
         _ => Ok(http_text("", Some(StatusCode::NOT_FOUND))),
     }
