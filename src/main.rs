@@ -121,7 +121,9 @@ async fn http_send_file(
             return Ok(http_text("", Some(StatusCode::INTERNAL_SERVER_ERROR), None));
         }
         // Use the current time converted to big-endian as a pseudo-random port number for the example port
-        let example_port = if client.port == "80" {
+        let example_port = if (client.port == "80" && client.protocol == "HTTP/TCP")
+            || (client.port == "443" && client.protocol == "HTTPS/TCP")
+        {
             (SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -297,10 +299,7 @@ async fn handle_client(stream: TcpStream, acceptor_opt: Option<TlsAcceptor>) {
                 let io = TokioIo::new(stream);
                 client.protocol = "HTTP/TCP".to_string();
                 if let Err(err) = http1::Builder::new()
-                    .serve_connection(
-                        io,
-                        service_fn(move |req| handle_http(req, client.clone())),
-                    )
+                    .serve_connection(io, service_fn(move |req| handle_http(req, client.clone())))
                     .await
                 {
                     eprintln!("Error serving connection: {:?}", err);
@@ -572,11 +571,11 @@ async fn main() {
     ) {
         match load_rustls_config(&cert, &key) {
             Some(cfg) => {
-                println!("Loaded TLS certificate and key; HTTPS enabled for port 443/mapped 443");
+                println!("Loaded TLS certificate and key");
                 Some(TlsAcceptor::from(Arc::new(cfg)))
             }
             None => {
-                eprintln!("Failed to load TLS certificate/key — continuing without HTTPS");
+                eprintln!("Failed to load TLS certificate/key, continuing without HTTPS");
                 None
             }
         }

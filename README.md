@@ -5,7 +5,7 @@ This is a server that listens on all TCP and UDP ports, allowing you to test whi
 There are multiple ways to use [whatports.work](http://whatports.work) (replacing 1234 with your desired port number):
 
 - Using the JavaScript test on the website.
-- Changing the port number in the URL, e.g. http://whatports.work:1234, HTTPS is currently unsupported.
+- Changing the port number in the URL, e.g. http://whatports.work:1234.
 - Using telnet or similar command line tools, e.g. telnet whatports.work 1234
   - netcat can be used for UDP testing, e.g. echo | nc -u whatports.work 1234
 - Using curl, e.g. curl http://whatports.work:1234/raw
